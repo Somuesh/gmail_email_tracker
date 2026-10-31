@@ -1,0 +1,13 @@
+{
+  "name": "mail-tracker-backend",
+  "version": "1.0.0",
+  "private": true,
+  "main": "server.js",
+  "scripts": { "start": "node server.js" },
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "@google-cloud/firestore": "^7.10.0",
+    "express": "^4.21.0",
+    "google-auth-library": "^9.14.0"
+  }
+}
