@@ -7,7 +7,6 @@ services:
   - type: web
     name: mail-tracker
     runtime: docker
-    rootDir: backend
     plan: free             # sleeps after ~15 min idle; use starter for customers
     region: singapore
     healthCheckPath: /healthz
