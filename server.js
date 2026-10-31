@@ -197,10 +197,31 @@ const csvCell = v => {
 };
 const csvRow = arr => arr.map(csvCell).join(',');
 
+function validTz(tz) {
+  try { new Intl.DateTimeFormat('en', { timeZone: tz }); return tz; } catch (e) { return 'UTC'; }
+}
+
 app.post('/api/export-link', auth, wrap(async (req, res) => {
-  const kind = (req.body || {}).kind === 'activity' ? 'activity' : 'emails';
-  res.json({ url: `${BASE}/export/${kind}.csv?t=${signExport(req.user.email)}` });
+  const b = req.body || {};
+  const kind = b.kind === 'opens' ? 'opens' : 'emails';
+  const tz = encodeURIComponent(validTz(b.tz || 'UTC'));
+  res.json({ url: `${BASE}/export/${kind}.csv?t=${signExport(req.user.email)}&tz=${tz}` });
 }));
+
+// Local-time pieces for analysis: "2026-10-31 18:24:05", date, hour (0-23), weekday.
+function localParts(d, tz) {
+  if (!d) return { dt: '', date: '', hour: '', weekday: '' };
+  const f = new Intl.DateTimeFormat('en-CA', {
+    timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23', weekday: 'long',
+  });
+  const p = {};
+  f.formatToParts(d).forEach(x => { p[x.type] = x.value; });
+  const date = `${p.year}-${p.month}-${p.day}`;
+  return { dt: `${date} ${p.hour}:${p.minute}:${p.second}`, date, hour: Number(p.hour), weekday: p.weekday };
+}
+const sourceName = c => (c === 'google-proxy' ? 'Gmail image proxy' : c === 'apple-or-proxy' ? 'Mail proxy' : 'Direct');
+const minutesBetween = (a, b) => (a && b ? Math.round(((b - a) / 60000) * 10) / 10 : '');
 
 app.get('/export/:kind.csv', wrap(async (req, res) => {
   const owner = verifyExport(req.query.t);
@@ -211,23 +232,52 @@ app.get('/export/:kind.csv', wrap(async (req, res) => {
     'Content-Disposition': `attachment; filename="mail-tracker-${req.params.kind}-${stamp}.csv"`,
     'Cache-Control': 'no-store',
   });
-  if (req.params.kind === 'activity') {
+  const tz = validTz(req.query.tz || 'UTC');
+
+  // One row per OPEN: ready for pivot tables (by hour, weekday, recipient, source ...).
+  if (req.params.kind === 'opens') {
     const r = await q(
-      `SELECT ev.at, ev.type, e.subject, e.recipients, ev.client, ev.url
+      `SELECT e.id, e.subject, e.recipients, e.created_at, ev.at, ev.client,
+              row_number() OVER (PARTITION BY e.id ORDER BY ev.at) AS n
        FROM events ev JOIN emails e ON e.id = ev.email_id
-       WHERE ev.owner=$1 ORDER BY ev.at DESC`, [owner]);
-    const lines = [csvRow(['Time (UTC)', 'Event', 'Email', 'Recipients', 'Source', 'Link'])];
-    r.rows.forEach(x => lines.push(csvRow([
-      x.at.toISOString(), x.type, x.subject, (x.recipients || []).join('; '), x.client || '', x.url || ''])));
+       WHERE ev.owner=$1 AND ev.type='open'
+       ORDER BY ev.at DESC`, [owner]);
+    const lines = [csvRow([
+      'Email ID', 'Label', 'Recipients', 'Recipient count', 'Sent at', 'Open #', 'Is first open',
+      'Opened at', 'Open date', 'Open hour (0-23)', 'Open weekday', 'Minutes since sent',
+      'Source', 'Possibly automated (proxy)'])];
+    r.rows.forEach(x => {
+      const sent = localParts(x.created_at, tz), opened = localParts(x.at, tz);
+      const rec = x.recipients || [];
+      lines.push(csvRow([
+        x.id, x.subject, rec.join('; '), rec.length, sent.dt, Number(x.n), Number(x.n) === 1 ? 'Yes' : 'No',
+        opened.dt, opened.date, opened.hour, opened.weekday, minutesBetween(x.created_at, x.at),
+        sourceName(x.client), x.client === 'direct' ? 'No' : 'Yes']));
+    });
     return res.send('\ufeff' + lines.join('\r\n'));
   }
+
+  // One row per EMAIL: summary with time-to-first-open.
   const r = await q(
-    `SELECT created_at, subject, recipients, opens, clicks, last_open_at
-     FROM emails WHERE owner=$1 ORDER BY created_at DESC`, [owner]);
-  const lines = [csvRow(['Created (UTC)', 'Email', 'Recipients', 'Opens', 'Clicks', 'Last opened (UTC)'])];
-  r.rows.forEach(x => lines.push(csvRow([
-    x.created_at.toISOString(), x.subject, (x.recipients || []).join('; '), x.opens, x.clicks,
-    x.last_open_at ? x.last_open_at.toISOString() : ''])));
+    `SELECT e.id, e.subject, e.recipients, e.created_at, e.opens,
+            min(ev.at) AS first_open, max(ev.at) AS last_open,
+            count(*) FILTER (WHERE ev.client = 'direct') AS direct_opens,
+            count(*) FILTER (WHERE ev.client <> 'direct') AS proxy_opens
+     FROM emails e LEFT JOIN events ev ON ev.email_id = e.id AND ev.type = 'open'
+     WHERE e.owner=$1 GROUP BY e.id ORDER BY e.created_at DESC`, [owner]);
+  const lines = [csvRow([
+    'Email ID', 'Label', 'Recipients', 'Recipient count', 'Sent at', 'Sent date', 'Sent hour (0-23)',
+    'Sent weekday', 'Opened?', 'Total opens', 'Direct opens', 'Proxy opens', 'First opened at',
+    'Last opened at', 'Minutes to first open'])];
+  r.rows.forEach(x => {
+    const sent = localParts(x.created_at, tz);
+    const rec = x.recipients || [];
+    lines.push(csvRow([
+      x.id, x.subject, rec.join('; '), rec.length, sent.dt, sent.date, sent.hour, sent.weekday,
+      x.opens > 0 ? 'Yes' : 'No', x.opens, Number(x.direct_opens), Number(x.proxy_opens),
+      localParts(x.first_open, tz).dt, localParts(x.last_open, tz).dt,
+      minutesBetween(x.created_at, x.first_open)]));
+  });
   res.send('\ufeff' + lines.join('\r\n'));
 }));
 
