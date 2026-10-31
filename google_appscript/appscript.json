@@ -1,0 +1,34 @@
+{
+  "timeZone": "Asia/Kolkata",
+  "dependencies": {},
+  "exceptionLogging": "STACKDRIVER",
+  "runtimeVersion": "V8",
+  "oauthScopes": [
+    "https://www.googleapis.com/auth/gmail.addons.execute",
+    "https://www.googleapis.com/auth/gmail.addons.current.action.compose",
+    "https://www.googleapis.com/auth/gmail.addons.current.message.metadata",
+    "https://www.googleapis.com/auth/script.external_request",
+    "openid",
+    "email"
+  ],
+  "urlFetchWhitelist": ["YOUR_RENDER_URL"],
+  "addOns": {
+    "common": {
+      "name": "Mail Tracker",
+      "logoUrl": "https://www.gstatic.com/images/branding/product/1x/gmail_48dp.png",
+      "layoutProperties": { "primaryColor": "#1a73e8" },
+      "homepageTrigger": { "runFunction": "onHomepage", "enabled": true }
+    },
+    "gmail": {
+      "contextualTriggers": [
+        { "unconditional": {}, "onTriggerFunction": "onMessageOpen" }
+      ],
+      "composeTrigger": {
+        "selectActions": [
+          { "text": "Track this email", "runFunction": "onComposeOpen" }
+        ],
+        "draftAccess": "METADATA"
+      }
+    }
+  }
+}
